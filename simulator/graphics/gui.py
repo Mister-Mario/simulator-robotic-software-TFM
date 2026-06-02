@@ -83,12 +83,35 @@ class MainApplication(tk.Tk):
         self.__update_track()
         # if not, the track raises exception
 
-    def execute(self):
+    def execute(self, event=None):
         self.drawing_frame.canvas.focus_force()
         self.controller.execute(self.selector_bar.gamification_option_selector.current())
 
-    def stop(self):
+    def stop(self, event=None):
         self.controller.stop()
+
+    def toggle_digital_twin_mode(self, event=None):
+        if self.selector_bar.twin_var.get():
+            self.selector_bar.show_twin_controls()
+        else:
+            if self.controller.is_twin_active():
+                self.controller.disconnect_twin()
+            self.selector_bar.hide_twin_controls()
+
+    def mqtt_connect(self, event=None):
+        if self.controller.is_twin_active():
+            self.controller.disconnect_twin()
+        else:
+            self.controller.connect_twin(self.selector_bar.theme_entry.get())
+
+    def mqtt_disconnect(self, event=None):
+        self.controller.disconnect_twin()
+
+    def on_twin_connected(self):
+        self.selector_bar.set_connected(True)
+
+    def on_twin_disconnected(self):
+        self.selector_bar.set_connected(False)
 
     def editor_undo(self):
         self.editor_frame.text.edit_undo()
@@ -319,6 +342,8 @@ class MainApplication(tk.Tk):
         self.controller.exit()
         self.controller.record_results(False, self.challenge)
         self.stop()
+        if self.controller.is_twin_active():
+            self.controller.disconnect_twin()
         self.destroy()
 
 
@@ -1260,6 +1285,8 @@ class ConsoleFrame(tk.Frame):
                                     fg="white", font=("Consolas", 12))
         self.input_button = tk.Button(self.input_frame, bd=0, bg=BLUE, fg=DARK_BLUE, text="Enviar",
                                       font=("Consolas", 12), command=self.__send_input, underline=0)
+        self.twin_button = tk.Button(self.input_frame, bd=0, bg=BLUE, fg=DARK_BLUE, text="Twin",
+                                     font=("Consolas", 12), command=self.__send_twin)
 
         self.console.config(state=tk.DISABLED, yscrollcommand=self.sb_y.set)
         self.check_out.select()
@@ -1271,6 +1298,7 @@ class ConsoleFrame(tk.Frame):
         self.check_error.grid(column=0, row=2)
 
         self.input_button.pack(side=tk.RIGHT, padx=(5, 0))
+        self.twin_button.pack(side=tk.RIGHT, padx=(5, 0))
         self.input_entry.pack(fill=tk.X, expand=True)
 
         self.sb_y.pack(fill=tk.Y, side=tk.RIGHT)
@@ -1302,6 +1330,9 @@ class ConsoleFrame(tk.Frame):
 
     def __send_input(self):
         self.application.controller.send_input(self.input_entry.get())
+
+    def __send_twin(self):
+        self.application.controller.send_twin_input(self.input_entry.get())
 
 
 class ButtonBar(tk.Frame):
@@ -1506,6 +1537,21 @@ class SelectorBar(tk.Frame):
             "Libre", "Desafío 1", "Desafío 2", "Desafío 3", "Desafío 4", "Desafío 5", "Desafío 6"]
         self.gamification_option_selector.current(0)
 
+        # --- Modo gemelo digital (MQTT) ---
+        self.twin_var = tk.BooleanVar(value=False)
+        self.twin_check = tk.Checkbutton(
+            self, text="Gemelo digital", variable=self.twin_var,
+            command=application.toggle_digital_twin_mode,
+            bg=DARK_BLUE, fg="white", activebackground=DARK_BLUE,
+            activeforeground="white", selectcolor=DARK_BLUE,
+            font=("Consolas", 13), underline=0)
+        self.lb_theme = tk.Label(self, text="Tema:", bg=DARK_BLUE, fg="white",
+                                 font=("Consolas", 13))
+        self.theme_entry = tk.Entry(self, width=12, font=("Consolas", 13))
+        self.connect_button = tk.Button(
+            self, text="Conectar", command=application.mqtt_connect,
+            bg=BLUE, fg="white", activebackground=BLUE, font=("Consolas", 11))
+
         self.robot_selector.bind(
             "<<ComboboxSelected>>", application.change_robot)
         self.track_selector.bind(
@@ -1515,11 +1561,13 @@ class SelectorBar(tk.Frame):
         application.bind("<Alt-r>", lambda event: self.robot_selector.focus())
         application.bind("<Alt-i>", lambda event: self.track_selector.focus())
         application.bind("<Alt-o>", lambda event: self.gamification_option_selector.focus())
+        application.bind("<Alt-g>", lambda event: self.twin_check.invoke())
 
         self.lb_robot.grid(row=0, column=0)
         self.robot_selector.grid(row=0, column=1, padx=(5, 15))
         self.lb_track.grid(row=0, column=2)
         self.track_selector.grid(row=0, column=3, padx=(5, 10))
+        self.twin_check.grid(row=0, column=4, padx=(15, 5))
 
     def hide_circuit_selector(self):
         if self.lb_track.winfo_ismapped():
@@ -1544,3 +1592,20 @@ class SelectorBar(tk.Frame):
             self.lb_gamification_option.grid(row=0, column=2)
         if not self.gamification_option_selector.winfo_ismapped():
             self.gamification_option_selector.grid(row=0, column=3, padx=(5, 10))
+
+    def show_twin_controls(self):
+        self.lb_theme.grid(row=0, column=5)
+        self.theme_entry.grid(row=0, column=6, padx=(5, 5))
+        self.connect_button.grid(row=0, column=7, padx=(0, 5))
+
+    def hide_twin_controls(self):
+        if self.connect_button.winfo_ismapped():
+            self.connect_button.grid_forget()
+        if self.theme_entry.winfo_ismapped():
+            self.theme_entry.grid_forget()
+        if self.lb_theme.winfo_ismapped():
+            self.lb_theme.grid_forget()
+
+    def set_connected(self, connected):
+        self.connect_button.config(
+            text="Desconectar" if connected else "Conectar")

@@ -249,7 +249,6 @@ class ArduinoUno(Board):
             "pin": pin
         }
         self.pines.append(att_pin)
-        print(self.pines)
 
     def draw_buttons(self, x, y):
         button1 = {

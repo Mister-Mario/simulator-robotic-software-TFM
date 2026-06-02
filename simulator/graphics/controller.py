@@ -1,9 +1,17 @@
+import queue
 import graphics.layers as layers
 import output.console as console
 import output.console_gamification as console_gamification
 import compiler.commands as commands
 import graphics.screen_updater as screen_updater
+import digital_twin.mqtt_twin as mqtt_twin
+import digital_twin.secure_config as secure_config
+import digital_twin.twin_identity as twin_identity
 from datetime import datetime
+
+# Tiempo máximo de espera (ms) para establecer la conexión MQTT antes de
+# informar de un fallo (respaldo del callback on_connect_fail de paho).
+_CONNECT_TIMEOUT_MS = 8000
 
 
 class RobotsController:
@@ -19,6 +27,11 @@ class RobotsController:
         self.executing = False
         self.board = False
         self.new = True
+        self.twin_client = None
+        self._twin_identity = twin_identity.TwinIdentity()
+        self._twin_poll_id = None
+        self._twin_connected = False
+        self._twin_connect_watchdog = None
 
     def execute(self, option_gamification):
         if not self.board:
@@ -64,6 +77,158 @@ class RobotsController:
 
     def configure_console(self, text_component):
         self.console = console.Console(text_component)
+
+    # ----------------------------------------------------- Gemelo digital MQTT
+    def is_twin_active(self):
+        """True si hay un cliente de gemelo digital creado (conectado o
+        intentando conectar)."""
+        return self.twin_client is not None
+
+    def connect_twin(self, theme):
+        """Inicia la conexión del gemelo digital con el theme dado.
+
+        La conexión es **asíncrona** (no bloquea la GUI): el resultado llega
+        después por la cola de eventos y se procesa en _handle_twin_event.
+        """
+        theme = (theme or "").strip()
+        if self.twin_client is not None:
+            self.disconnect_twin()
+        if theme == "":
+            self.console.write_output(
+                "Gemelo digital: introduce un tema antes de conectar.\n")
+            return
+        try:
+            host, port = secure_config.load_broker_config()
+        except Exception as error:
+            self.console.write_output(
+                "Gemelo digital: no se pudo leer la configuración del broker ("
+                + str(error) + ").\n")
+            return
+        client = mqtt_twin.DigitalTwinClient(
+            theme, host, port, self._twin_identity)
+        try:
+            client.connect_async()
+        except (ValueError, OSError) as error:
+            self.console.write_output(
+                "Gemelo digital: configuración de conexión inválida ("
+                + str(error) + ").\n")
+            return
+        self.twin_client = client
+        self._twin_connected = False
+        self._twin_poll_id = self.view.after(50, self._poll_twin_inbox)
+        self._twin_connect_watchdog = self.view.after(
+            _CONNECT_TIMEOUT_MS, self._twin_connect_timeout)
+        self.console.write_output(
+            "Gemelo digital: conectando a " + str(host) + ":" + str(port)
+            + " ...\n")
+        self.view.on_twin_connected()
+
+    def disconnect_twin(self):
+        """Desconecta el gemelo digital (acción del usuario)."""
+        self._teardown_twin(announce=True)
+
+    def _teardown_twin(self, announce):
+        """Detiene cliente, sondeo y watchdog. Si announce, informa en consola."""
+        if self.twin_client is None:
+            return
+        self._cancel_twin_watchdog()
+        if self._twin_poll_id is not None:
+            self.view.after_cancel(self._twin_poll_id)
+            self._twin_poll_id = None
+        try:
+            self.twin_client.disconnect()
+        except Exception:
+            pass
+        self.twin_client = None
+        self._twin_connected = False
+        if announce:
+            self.console.write_output("Gemelo digital desconectado.\n")
+        self.view.on_twin_disconnected()
+
+    def _cancel_twin_watchdog(self):
+        if self._twin_connect_watchdog is not None:
+            self.view.after_cancel(self._twin_connect_watchdog)
+            self._twin_connect_watchdog = None
+
+    def _twin_connect_timeout(self):
+        """Respaldo: si pasado el tiempo límite no hubo respuesta, falla."""
+        self._twin_connect_watchdog = None
+        if self.twin_client is not None and not self._twin_connected:
+            self.console.write_output(
+                "Gemelo digital: no se pudo conectar al broker (sin respuesta).\n")
+            self._teardown_twin(announce=False)
+
+    def publish_twin(self, text):
+        """Publica texto en el tema del gemelo (hook para la capa de estado)."""
+        if self.twin_client is not None:
+            self.twin_client.publish_text(text)
+
+    def send_twin_input(self, text):
+        """Publica por MQTT el texto escrito en la consola (botón "Twin").
+
+        Solo publica si el gemelo está conectado (CONNACK recibido); si no, avisa
+        en la consola. Hace eco de lo enviado con el mismo formato que los mensajes
+        entrantes.
+        """
+        text = (text or "").strip()
+        if not self._twin_connected:
+            self.console.write_output(
+                "Gemelo digital no conectado: no se puede publicar.\n")
+            return
+        if text == "":
+            return
+        self.publish_twin(text)
+        self.console.write_output(
+            'Publicado en "' + self.twin_client.pub_topic + '": ' + text + "\n")
+
+    def _poll_twin_inbox(self):
+        """Drena la cola de eventos MQTT en el hilo de Tk y se reprograma."""
+        client = self.twin_client
+        if client is None:
+            return
+        while True:
+            try:
+                event = client.events.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_twin_event(event)
+        if self.twin_client is not None:
+            self._twin_poll_id = self.view.after(50, self._poll_twin_inbox)
+
+    def _handle_twin_event(self, event):
+        """Traduce un evento de la cola MQTT a mensajes/efectos en la GUI."""
+        kind = event[0]
+        if kind == "connect":
+            self._cancel_twin_watchdog()
+            if event[1] == 0:
+                self._twin_connected = True
+                self.console.write_output(
+                    "Gemelo digital conectado — pub: " + self.twin_client.pub_topic
+                    + " · sub: " + self.twin_client.sub_topic + "\n")
+                self.view.on_twin_connected()
+            else:
+                self.console.write_output(
+                    "Gemelo digital: el broker rechazó la conexión (código "
+                    + str(event[1]) + ").\n")
+                self._teardown_twin(announce=False)
+        elif kind == "connect_fail":
+            if self.twin_client is not None and not self._twin_connected:
+                self.console.write_output(
+                    "Gemelo digital: no se pudo conectar al broker.\n")
+                self._teardown_twin(announce=False)
+        elif kind == "message":
+            self.console.write_output(
+                'Mensaje recibido en el tema "' + event[1] + '": ' + event[2] + "\n")
+        elif kind == "suback":
+            if event[1] and self.twin_client is not None:
+                self.console.write_output(
+                    "Gemelo digital: el tema " + self.twin_client.sub_topic
+                    + " ya está ocupado por otro cliente (whitelist).\n")
+        elif kind == "disconnect":
+            if event[1] != 0:
+                self.console.write_output(
+                    "Gemelo digital: conexión perdida (código "
+                    + str(event[1]) + ").\n")
 
     def change_robot(self, option):
         """
