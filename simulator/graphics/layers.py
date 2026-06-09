@@ -122,6 +122,10 @@ class Layer:
 
 class MobileRobotLayer(Layer):
 
+    # Side of the (square) world used by the infinite circuit. Big enough to
+    # feel limitless during a session; the camera keeps the robot centred.
+    INFINITE_SIZE = 200000
+
     def __init__(self, n_light_sens):
         """
         Constructor for MobileRobotLayer
@@ -141,6 +145,12 @@ class MobileRobotLayer(Layer):
         self.is_moving = False
         self.circuit = None
         self.obstacle = None
+        # Infinite circuit: free unbounded plane with a trail behind the robot
+        self.infinite = False
+        self.trail = None
+        # Last camera scroll offset (canvas px); None = not positioned yet
+        self._cam_x = None
+        self._cam_y = None
 
     def move(self, using_keys, move_WASD):
         """
@@ -154,13 +164,18 @@ class MobileRobotLayer(Layer):
             v, da = self.__move_code()
 
         future_p = self.robot_drawing.predict_movement(v)
-        if (
-                v == 0
-                or future_p[0] <= self.robot_drawing.width / 2
+        hit_border = (
+                future_p[0] <= self.robot_drawing.width / 2
                 or future_p[0] >= self.robot_drawing.drawing_width - self.robot_drawing.width / 2
                 or future_p[1] <= self.robot_drawing.height / 2
                 or future_p[1] >= self.robot_drawing.drawing_height - self.robot_drawing.height / 2
-                or self.__check_obstacle_collision(future_p[0], future_p[1])
+        )
+        # On the infinite circuit there are no borders nor obstacles to block
+        if (
+                v == 0
+                or (not self.infinite
+                    and (hit_border
+                         or self.__check_obstacle_collision(future_p[0], future_p[1])))
         ):
             v = 0
             self.is_moving = False
@@ -177,6 +192,11 @@ class MobileRobotLayer(Layer):
         if self.obstacle is not None:
             self.__detect_obstacle()
 
+        # Infinite circuit: extend the trail and keep the camera on the robot
+        if self.infinite and self.trail is not None:
+            self.trail.add_point(self.robot_drawing.x, self.robot_drawing.y)
+            self.__follow_camera()
+
     def set_circuit(self, circuit_opt):
         """
         Changes the circuit
@@ -184,6 +204,11 @@ class MobileRobotLayer(Layer):
             circuit_opt: the number of the chosen circuit
         """
         circuit_name = self.__parse_circuit_opt(circuit_opt)
+        if circuit_name == "infinite":
+            self.__set_infinite_circuit()
+            return
+        self.infinite = False
+        self.trail = None
         map_tuple = self.rdr.parse_circuit(circuit_name)
         straights = map_tuple[0]
         obstacles = map_tuple[1]
@@ -193,14 +218,35 @@ class MobileRobotLayer(Layer):
             self.obstacle = robot_drawings.Obstacle(obstacles[0], self.drawing)
         self.reset_robot()
 
-    def reset_robot(self):
+    def __set_infinite_circuit(self):
+        """
+        Configures the infinite circuit: an unbounded empty plane where the
+        robot is driven freely, the camera follows it and it leaves a trail.
+        """
+        self.infinite = True
+        self.circuit = None
+        self.obstacle = None
+        self._cam_x = None
+        self._cam_y = None
+        self.reset_robot(infinite=True)
+        self.trail = robot_drawings.Trail(self.drawing)
+
+    def reset_robot(self, infinite=False):
         """
         Resets the robot
+        Arguments:
+            infinite: if True, builds the robot on the enlarged world and
+            centred, for the infinite circuit
         """
         self.hud = huds.MobileHUD()
         self.robot = robots.MobileRobot(self.n_sens, self.robot_data)
-        self.robot_drawing = robot_drawings.MobileRobotDrawing(
-            self.drawing, self.n_sens)
+        if infinite:
+            size = self.INFINITE_SIZE
+            self.robot_drawing = robot_drawings.MobileRobotDrawing(
+                self.drawing, self.n_sens, size, size, size // 2, size // 2)
+        else:
+            self.robot_drawing = robot_drawings.MobileRobotDrawing(
+                self.drawing, self.n_sens)
 
     def __move_keys(self, movement):
         """
@@ -285,6 +331,8 @@ class MobileRobotLayer(Layer):
             return "straight and obstacle"
         elif circuit_opt == 5:
             return "node circuit"
+        elif circuit_opt == 6:
+            return "infinite"
         return "circuit"
 
     def _drawing_config(self):
@@ -293,6 +341,8 @@ class MobileRobotLayer(Layer):
         updating
         """
         super()._drawing_config()
+        if self.infinite and self.trail is not None:
+            self.trail.reset()  # start each run with a clean trail
         self.__create_circuit()
         self.__create_obstacle()
 
@@ -302,6 +352,40 @@ class MobileRobotLayer(Layer):
         """
         self.__create_circuit()
         self.__create_obstacle()
+        if self.infinite and self.trail is not None:
+            self.trail.draw()
+
+    def __follow_camera(self):
+        """
+        Scrolls the canvas so the robot stays centred in the viewport,
+        giving the infinite plane its "camera follows the car" feel.
+
+        The target scroll is quantised to whole canvas pixels and only applied
+        when it actually changes; otherwise the per-frame sub-pixel rounding of
+        xview_moveto fights the robot position and makes the car vibrate.
+        """
+        canvas = self.drawing.canvas
+        if canvas is None:
+            return
+        scale = self.drawing.scale
+        total_w = self.robot_drawing.drawing_width * scale
+        total_h = self.robot_drawing.drawing_height * scale
+        view_w = canvas.winfo_width()
+        view_h = canvas.winfo_height()
+        # Robot pixel on the canvas, computed exactly like Drawing.move_image
+        # (int(coord * scale)). Driving the camera from the same integer keeps
+        # the robot's screen position constant (no sub-pixel wobble).
+        robot_px = int(self.robot_drawing.x * scale)
+        robot_py = int(self.robot_drawing.y * scale)
+        cam_x = min(max(robot_px - view_w // 2, 0), int(max(total_w - view_w, 0)))
+        cam_y = min(max(robot_py - view_h // 2, 0), int(max(total_h - view_h, 0)))
+        # +0.5 px bias so tkinter's fraction->pixel truncation lands on cam_*
+        if total_w > 0 and cam_x != self._cam_x:
+            self._cam_x = cam_x
+            canvas.xview_moveto((cam_x + 0.5) / total_w)
+        if total_h > 0 and cam_y != self._cam_y:
+            self._cam_y = cam_y
+            canvas.yview_moveto((cam_y + 0.5) / total_h)
 
     def __create_circuit(self):
         """

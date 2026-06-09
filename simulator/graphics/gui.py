@@ -93,10 +93,14 @@ class MainApplication(tk.Tk):
     def toggle_digital_twin_mode(self, event=None):
         if self.selector_bar.twin_var.get():
             self.selector_bar.show_twin_controls()
+            self.selector_bar.hide_arduino_robot()
+            self.console_frame.show_twin_button()
         else:
             if self.controller.is_twin_active():
                 self.controller.disconnect_twin()
             self.selector_bar.hide_twin_controls()
+            self.selector_bar.recover_arduino_robot()
+            self.console_frame.hide_twin_button()
 
     def mqtt_connect(self, event=None):
         if self.controller.is_twin_active():
@@ -385,7 +389,7 @@ class PinConfigurationWindow(tk.Toplevel):
             frame_content, text="Pin servo izquierdo:", underline=10)
         self.entry_pin_se1 = tk.Entry(frame_content)
         self.lb_pin_servo2 = tk.Label(
-            frame_content, text="Pin servo derecho:", underline=10)
+            frame_content, text="Pin servo derecho:", underline=7)
         self.entry_pin_se2 = tk.Entry(frame_content)
         self.lb_pin_light2 = tk.Label(
             frame_content, text="Pin luz izquierda:", underline=9)
@@ -531,7 +535,7 @@ class PinConfigurationWindow(tk.Toplevel):
         self.entry_pin_so2.insert(tk.END, self.data["sound_echo"])
 
         self.bind("<Alt-i>", lambda event: self.entry_pin_se1.focus())
-        self.bind("<Alt-d>", lambda event: self.entry_pin_se2.focus())
+        self.bind("<Alt-v>", lambda event: self.entry_pin_se2.focus())
         self.bind("<Alt-z>", lambda event: self.entry_pin_l2.focus())
         self.bind("<Alt-r>", lambda event: self.entry_pin_l3.focus())
         self.bind("<Alt-t>", lambda event: self.entry_pin_so1.focus())
@@ -572,7 +576,7 @@ class PinConfigurationWindow(tk.Toplevel):
         self.entry_pin_so2.insert(tk.END, self.data["sound_echo"])
 
         self.bind("<Alt-i>", lambda event: self.entry_pin_se1.focus())
-        self.bind("<Alt-d>", lambda event: self.entry_pin_se2.focus())
+        self.bind("<Alt-v>", lambda event: self.entry_pin_se2.focus())
         self.bind("<Alt-z>", lambda event: self.entry_pin_l2.focus())
         self.bind("<Alt-r>", lambda event: self.entry_pin_l3.focus())
         self.bind("<Alt-q>", lambda event: self.entry_pin_l1.focus())
@@ -615,7 +619,7 @@ class PinConfigurationWindow(tk.Toplevel):
         self.entry_pin_so2.insert(tk.END, self.data["sound_echo"])
 
         self.bind("<Alt-i>", lambda event: self.entry_pin_se1.focus())
-        self.bind("<Alt-d>", lambda event: self.entry_pin_se2.focus())
+        self.bind("<Alt-v>", lambda event: self.entry_pin_se2.focus())
         self.bind("<Alt-z>", lambda event: self.entry_pin_l2.focus())
         self.bind("<Alt-r>", lambda event: self.entry_pin_l3.focus())
         self.bind("<Alt-q>", lambda event: self.entry_pin_l1.focus())
@@ -1286,7 +1290,7 @@ class ConsoleFrame(tk.Frame):
         self.input_button = tk.Button(self.input_frame, bd=0, bg=BLUE, fg=DARK_BLUE, text="Enviar",
                                       font=("Consolas", 12), command=self.__send_input, underline=0)
         self.twin_button = tk.Button(self.input_frame, bd=0, bg=BLUE, fg=DARK_BLUE, text="Twin",
-                                     font=("Consolas", 12), command=self.__send_twin)
+                                     font=("Consolas", 12), command=self.__send_twin, underline=0)
 
         self.console.config(state=tk.DISABLED, yscrollcommand=self.sb_y.set)
         self.check_out.select()
@@ -1298,7 +1302,6 @@ class ConsoleFrame(tk.Frame):
         self.check_error.grid(column=0, row=2)
 
         self.input_button.pack(side=tk.RIGHT, padx=(5, 0))
-        self.twin_button.pack(side=tk.RIGHT, padx=(5, 0))
         self.input_entry.pack(fill=tk.X, expand=True)
 
         self.sb_y.pack(fill=tk.Y, side=tk.RIGHT)
@@ -1312,6 +1315,15 @@ class ConsoleFrame(tk.Frame):
         self.application.bind("<Alt-w>", self.change_warning)
         self.application.bind("<Alt-o>", self.change_error)
         self.application.bind("<Alt-e>", lambda event: self.__send_input())
+        self.application.bind("<Alt-t>", lambda event: self.__send_twin())
+
+    def show_twin_button(self):
+        if not self.twin_button.winfo_ismapped():
+            self.twin_button.pack(side=tk.RIGHT, padx=(5, 0), before=self.input_entry)
+
+    def hide_twin_button(self):
+        if self.twin_button.winfo_ismapped():
+            self.twin_button.pack_forget()
 
     def change_output(self, event=None):
         self.check_out.toggle()
@@ -1522,16 +1534,18 @@ class SelectorBar(tk.Frame):
         self.track_selector = ttk.Combobox(self, state="readonly")
         self.gamification_option_selector = ttk.Combobox(self, state="readonly")
 
-        self.robot_selector['values'] = ["Robot móvil (2 infrarrojos)",
-                                         "Robot móvil (3 infrarrojos)",
-                                         "Robot móvil (4 infrarrojos)",
-                                         "Actuador lineal",
-                                         "Placa arduino"]
+        self.application = application
+        self.all_robots = ["Robot móvil (2 infrarrojos)",
+                           "Robot móvil (3 infrarrojos)",
+                           "Robot móvil (4 infrarrojos)",
+                           "Actuador lineal",
+                           "Placa arduino"]
+        self.robot_selector['values'] = self.all_robots
         self.robot_selector.current(0)
         self.track_selector['values'] = [
             "Circuito", "Laberinto", "Recta",
             "Obstáculo", "Recta y obstáculo",
-            "Circuito con nodos"]
+            "Circuito con nodos", "Recorrido infinito"]
         self.track_selector.current(0)
         self.gamification_option_selector['values'] = [
             "Libre", "Desafío 1", "Desafío 2", "Desafío 3", "Desafío 4", "Desafío 5", "Desafío 6"]
@@ -1550,7 +1564,8 @@ class SelectorBar(tk.Frame):
         self.theme_entry = tk.Entry(self, width=12, font=("Consolas", 13))
         self.connect_button = tk.Button(
             self, text="Conectar", command=application.mqtt_connect,
-            bg=BLUE, fg="white", activebackground=BLUE, font=("Consolas", 11))
+            bg=BLUE, fg="white", activebackground=BLUE, font=("Consolas", 11),
+            underline=2)  # 'n' de Conectar (Alt-n); en Desconectar -> 'd' (Alt-d)
 
         self.robot_selector.bind(
             "<<ComboboxSelected>>", application.change_robot)
@@ -1562,12 +1577,27 @@ class SelectorBar(tk.Frame):
         application.bind("<Alt-i>", lambda event: self.track_selector.focus())
         application.bind("<Alt-o>", lambda event: self.gamification_option_selector.focus())
         application.bind("<Alt-g>", lambda event: self.twin_check.invoke())
+        # Conectar = Alt-n, Desconectar = Alt-d (mismo boton, texto alterna)
+        application.bind("<Alt-n>", lambda event: self.connect_button.invoke()
+                         if self.connect_button.winfo_ismapped() else None)
+        application.bind("<Alt-d>", lambda event: self.connect_button.invoke()
+                         if self.connect_button.winfo_ismapped() else None)
 
         self.lb_robot.grid(row=0, column=0)
         self.robot_selector.grid(row=0, column=1, padx=(5, 15))
         self.lb_track.grid(row=0, column=2)
         self.track_selector.grid(row=0, column=3, padx=(5, 10))
         self.twin_check.grid(row=0, column=4, padx=(15, 5))
+
+    def hide_arduino_robot(self):
+        # "Placa arduino" = arduinoBoard, no aplica en gemelo digital
+        if self.robot_selector.current() == 4:
+            self.robot_selector.current(0)
+            self.application.change_robot(None)
+        self.robot_selector['values'] = self.all_robots[:-1]
+
+    def recover_arduino_robot(self):
+        self.robot_selector['values'] = self.all_robots
 
     def hide_circuit_selector(self):
         if self.lb_track.winfo_ismapped():
@@ -1608,4 +1638,5 @@ class SelectorBar(tk.Frame):
 
     def set_connected(self, connected):
         self.connect_button.config(
-            text="Desconectar" if connected else "Conectar")
+            text="Desconectar" if connected else "Conectar",
+            underline=0 if connected else 2)  # 'd' de Desconectar / 'n' de Conectar
