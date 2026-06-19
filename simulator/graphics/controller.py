@@ -7,6 +7,7 @@ import graphics.screen_updater as screen_updater
 import digital_twin.mqtt_twin as mqtt_twin
 import digital_twin.secure_config as secure_config
 import digital_twin.twin_identity as twin_identity
+import digital_twin.protocol as protocol
 from datetime import datetime
 
 # Tiempo máximo de espera (ms) para establecer la conexión MQTT antes de
@@ -32,6 +33,10 @@ class RobotsController:
         self._twin_poll_id = None
         self._twin_connected = False
         self._twin_connect_watchdog = None
+        # Control en vivo del actuador físico (jog) desde el simulador.
+        self._twin_control_active = False  # True tras enviar "C O" (0,1)
+        self._twin_jog_state = None        # último jog publicado: "3,0"/"3,1"/"4"
+        self._twin_jog_last_ms = 0         # marca de tiempo del último envío (keepalive)
 
     def execute(self, option_gamification):
         if not self.board:
@@ -53,6 +58,7 @@ class RobotsController:
         screen_updater.refresh()
         if not self.view.keys_used:
             self.loop_command.execute()
+        self._twin_drive_actuator()
         self.view.identifier = self.view.after(10, self.drawing_loop)
 
     def stop(self):
@@ -141,6 +147,10 @@ class RobotsController:
             pass
         self.twin_client = None
         self._twin_connected = False
+        self._twin_control_active = False
+        self._twin_jog_state = None
+        if isinstance(self.robot_layer, layers.LinearActuatorLayer):
+            self.robot_layer.twin_external = False
         if announce:
             self.console.write_output("Gemelo digital desconectado.\n")
         self.view.on_twin_disconnected()
@@ -164,11 +174,13 @@ class RobotsController:
             self.twin_client.publish_text(text)
 
     def send_twin_input(self, text):
-        """Publica por MQTT el texto escrito en la consola (botón "Twin").
+        """Traduce la instrucción legible de la consola a su forma compacta y la
+        publica por MQTT (botón "Twin").
 
-        Solo publica si el gemelo está conectado (CONNACK recibido); si no, avisa
-        en la consola. Hace eco de lo enviado con el mismo formato que los mensajes
-        entrantes.
+        La traducción **solo entra en juego con el gemelo conectado**: si no hay
+        conexión (CONNACK recibido) no se publica nada y se avisa en consola. Si la
+        instrucción no es válida, se informa del error y tampoco se publica. En el eco
+        se muestran ambas formas (legible -> compacta).
         """
         text = (text or "").strip()
         if not self._twin_connected:
@@ -177,9 +189,97 @@ class RobotsController:
             return
         if text == "":
             return
-        self.publish_twin(text)
+        try:
+            compact = protocol.encode(text)
+        except protocol.TranslationError as error:
+            self.console.write_output(
+                "Instrucción no válida (" + str(error) + ").\n")
+            return
+        self.publish_twin(compact)
+        # El control en vivo (jog) solo actúa tras ceder el control con "C O".
+        if compact == "0,1":
+            self._activate_twin_control()
+        elif compact == "0,0":
+            # Suelta el control: ALF vuelve a su modo autónomo y el simulador SIGUE
+            # reflejándolo (modo pasivo). twin_external se mantiene; solo lo desactiva
+            # la desconexión.
+            self._twin_control_active = False
+            self._twin_jog_state = None
         self.console.write_output(
-            'Publicado en "' + self.twin_client.pub_topic + '": ' + text + "\n")
+            'Publicado en "' + self.twin_client.pub_topic + '": '
+            + text + "  ->  " + compact + "\n")
+
+    def _activate_twin_control(self):
+        """Activa el control en vivo y, si el robot es el actuador, ancla su bloque
+        al extremo motor (derecha) para compartir la referencia con el homing físico."""
+        self._twin_control_active = True
+        self._twin_jog_state = None
+        if isinstance(self.robot_layer, layers.LinearActuatorLayer):
+            # Bajo control, la posición del bloque la dicta ALF (mensajes "5,<pos>"),
+            # no el teclado: se suprime el desplazamiento local del bloque.
+            self.robot_layer.twin_external = True
+            drawing = self.robot_layer.robot_drawing
+            drawing.block.x = 1912  # extremo motor en el simulador (der)
+            drawing.drawing.move_image("block", drawing.block.x, drawing.block.y)
+
+    def _twin_drive_actuator(self):
+        """Conduce el actuador físico en vivo: traduce la velocidad del bloque del
+        simulador a jog continuo (3,<dir>) / parada (4) y publica por MQTT.
+
+        Solo con el gemelo conectado, el control activo ("C O" enviado) y el robot
+        siendo el actuador lineal. Publica solo al cambiar de estado, con un keepalive
+        periódico mientras se mueve (no satura el canal ni hace eco en consola)."""
+        if not (self._twin_connected and self._twin_control_active):
+            return
+        if not isinstance(self.robot_layer, layers.LinearActuatorLayer):
+            return
+
+        v = getattr(self.robot_layer, "last_v", 0)
+        if v > 0:      # derecha -> lado motor
+            desired = "3,0"
+        elif v < 0:    # izquierda -> lado sensor
+            desired = "3,1"
+        else:
+            desired = "4"
+
+        now = datetime.now().timestamp() * 1000.0
+        moving = desired != "4"
+        changed = desired != self._twin_jog_state
+        keepalive = moving and (now - self._twin_jog_last_ms) >= 150
+        if changed or keepalive:
+            self.publish_twin(desired)
+            self._twin_jog_state = desired
+            self._twin_jog_last_ms = now
+
+    def _apply_twin_position(self, text):
+        """Refleja en AL1 el estado real reportado por ALF (lazo cerrado): posición del
+        bloque y estado de los finales de carrera. Devuelve True si el mensaje era un
+        reporte válido (se haya aplicado o no), para no duplicarlo como eco en consola.
+
+        pos = cambios desde el extremo motor (0 = motor/derecha, 140 = sensor/izquierda).
+        x = 1912 - pos * PX_POR_CAMBIO, saturado al recorrido del bloque [508, 1912].
+        Botones: motor = derecho, sensor = izquierdo. El estado de los finales SOLO sale
+        del estado físico reportado (pin en LOW); nunca se infiere de la posición.
+        """
+        fb = protocol.parse_position(text)
+        if fb is None:
+            return False
+        # Solo se refleja si el actuador está EN EJECUCIÓN: antes de pulsar "Ejecutar"
+        # el bloque y los pulsadores no están dibujados en el canvas (move_image daría
+        # KeyError). No hace falta tener el control: basta con estar conectado y ejecutando.
+        if self.executing and \
+                isinstance(self.robot_layer, layers.LinearActuatorLayer):
+            x = int(round(1912 - fb.pos * protocol.PX_POR_CAMBIO))
+            x = max(508, min(1912, x))
+            drawing = self.robot_layer.robot_drawing
+            drawing.block.x = x
+            drawing.drawing.move_image("block", drawing.block.x, drawing.block.y)
+
+            # Los botones reflejan el estado físico real (LOW = pulsado). Si el reporte
+            # no incluye los finales, no se tocan los botones (no se infiere de pos).
+            if fb.lim_motor is not None:
+                self.robot_layer.set_physical_limits(fb.lim_motor, fb.lim_sensor)
+        return True
 
     def _poll_twin_inbox(self):
         """Drena la cola de eventos MQTT en el hilo de Tk y se reprograma."""
@@ -202,6 +302,11 @@ class RobotsController:
             self._cancel_twin_watchdog()
             if event[1] == 0:
                 self._twin_connected = True
+                # Modo pasivo: con solo conectar, AL1 refleja la posición real de ALF
+                # (que puede oscilar solo). Se suprime el desplazamiento local del bloque
+                # para que el teclado no pelee con la posición reflejada.
+                if isinstance(self.robot_layer, layers.LinearActuatorLayer):
+                    self.robot_layer.twin_external = True
                 self.console.write_output(
                     "Gemelo digital conectado — pub: " + self.twin_client.pub_topic
                     + " · sub: " + self.twin_client.sub_topic + "\n")
@@ -217,6 +322,8 @@ class RobotsController:
                     "Gemelo digital: no se pudo conectar al broker.\n")
                 self._teardown_twin(announce=False)
         elif kind == "message":
+            if self._apply_twin_position(event[2]):
+                return
             self.console.write_output(
                 'Mensaje recibido en el tema "' + event[1] + '": ' + event[2] + "\n")
         elif kind == "suback":

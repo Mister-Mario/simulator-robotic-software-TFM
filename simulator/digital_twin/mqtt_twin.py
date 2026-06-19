@@ -25,9 +25,6 @@ except Exception:  # pragma: no cover - depende de la versión instalada
 
 import digital_twin.twin_identity as twin_identity
 
-# Texto que se publica al conectar, para que el otro extremo vea el enlace vivo.
-HELLO_MESSAGE = "Gemelo digital conectado"
-
 
 class DigitalTwinClient:
 
@@ -86,7 +83,6 @@ class DigitalTwinClient:
         code = getattr(rc, "value", rc)
         if code == 0:
             client.subscribe(self.sub_topic)
-            client.publish(self.pub_topic, HELLO_MESSAGE)
         self.events.put(("connect", code))
 
     def _on_message(self, client, userdata, msg):

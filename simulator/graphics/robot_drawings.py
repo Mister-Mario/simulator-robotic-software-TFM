@@ -99,6 +99,24 @@ class LinearActuatorDrawing(RobotDrawing):
             self.block.x += vel
             self.drawing.move_image("block", self.block.x, self.block.y)
 
+    def set_buttons(self, left_pressed, right_pressed):
+        """
+        Fija el estado de los pulsadores (final de carrera) y los redibuja.
+        Usado por el gemelo digital para reflejar el estado físico real.
+        Arguments:
+            left_pressed: True si el pulsador izquierdo (sensor) está pulsado
+            right_pressed: True si el pulsador derecho (motor) está pulsado
+        """
+        if left_pressed:
+            self.but_left.press()
+        else:
+            self.but_left.stop_press()
+        if right_pressed:
+            self.but_right.press()
+        else:
+            self.but_right.stop_press()
+        self.__redraw_buttons()
+
     def __redraw_buttons(self):
         """
         Redraws the buttons when they are changed

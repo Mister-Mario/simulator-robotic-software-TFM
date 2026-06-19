@@ -304,12 +304,30 @@ class MainApplication(tk.Tk):
         else:
             self.drawing_frame.key_drawing.forget()
 
+    def _typing_in_text_widget(self):
+        """True si el foco está en un campo de texto (consola, tema, editor,
+        configuración de pines...). En ese caso WASD escribe, no mueve el robot."""
+        widget = self.focus_get()
+        return isinstance(widget, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox))
+
+    def _clear_movement(self):
+        """Suelta todas las teclas de movimiento (evita que una quede 'pulsada')."""
+        for key in self.move_WASD:
+            self.move_WASD[key] = False
+
     def key_press(self, event):
+        # Mientras se escribe en un campo de texto, no se mueve el robot en ejecución.
+        if self._typing_in_text_widget():
+            self._clear_movement()
+            return
         pressed_key = event.char
         if pressed_key in self.move_WASD:
             self.move_WASD[pressed_key] = True
 
     def key_release(self, event):
+        if self._typing_in_text_widget():
+            self._clear_movement()
+            return
         pressed_key = event.char
         if pressed_key in self.move_WASD:
             self.move_WASD[pressed_key] = False

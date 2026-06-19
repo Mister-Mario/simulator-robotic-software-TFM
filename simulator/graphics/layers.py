@@ -479,6 +479,10 @@ class LinearActuatorLayer(Layer):
         self.robot_data = self.rdr.parse_robot(3)
         self.robot = robots.LinearActuator(self.robot_data)
         self.robot_drawing = robot_drawings.LinearActuatorDrawing(self.drawing)
+        self.last_v = 0  # última velocidad del bloque (px/tick), la lee el controller
+        # Bajo control del gemelo (lazo cerrado), la posición del bloque la fija ALF
+        # vía mensajes "5,<pos>"; el desplazamiento local del teclado se suprime.
+        self.twin_external = False
 
     def move(self, using_keys, move_WASD):
         """
@@ -487,11 +491,27 @@ class LinearActuatorLayer(Layer):
         """
         v = 0
         self.robot_drawing.hit = False
-        if using_keys:
-            v = self.__move_keys(move_WASD)
+        if self.twin_external:
+            # Bajo control del gemelo, la dirección (teclado o código) sale SOLO de la
+            # intención, sin toparse con los bordes simulados (508/1912): el límite real
+            # lo decide ALF (final de carrera físico). Si se gateara con 'block.x' (que
+            # aquí lo fija el feedback de ALF), al llegar el bloque al borde se frenaría
+            # a ALF antes de tocar el tope físico.
+            if using_keys:
+                v = self.__key_direction(move_WASD)
+            else:
+                v = self.__code_direction()
         else:
-            v = self.__move_code()
-        self.robot_drawing.move(v)
+            if using_keys:
+                v = self.__move_keys(move_WASD)
+            else:
+                v = self.__move_code()
+        # Última velocidad del bloque (px/tick). La lee el controller para conducir
+        # el actuador físico en vivo (jog) cuando el gemelo tiene el control.
+        self.last_v = v
+        # Bajo control del gemelo, el bloque no se desplaza en local: su posición la
+        # fija ALF (lazo cerrado). Se conserva 'v' solo como dirección para el jog.
+        self.robot_drawing.move(0 if self.twin_external else v)
         self.hud.set_direction(v * 25)
         self.hud.set_pressed(
             [self.robot_drawing.but_left.pressed, self.robot_drawing.but_right.pressed])
@@ -514,6 +534,33 @@ class LinearActuatorLayer(Layer):
             self.__hit_right(v == 0)
         return v
 
+    def __key_direction(self, movement):
+        """
+        Devuelve solo la dirección de las teclas (sin tope por bordes ni gestión de
+        pulsadores), para conducir el jog del actuador físico bajo control del gemelo.
+        Arguments:
+            movement: estado de las teclas WASD
+        """
+        if movement["a"] or movement["A"]:
+            return -15
+        if movement["d"] or movement["D"]:
+            return 15
+        return 0
+
+    def __code_direction(self):
+        """
+        Devuelve solo la dirección que pide el código (servo), sin tope por bordes ni
+        gestión de pulsadores, para conducir el jog del actuador físico bajo control del
+        gemelo cuando se ejecuta código en el simulador.
+        Convención de __move_code: servo.value < 90 -> hacia el motor (derecha, +);
+        > 90 -> hacia el sensor (izquierda, -); == 90 -> parado.
+        """
+        if self.robot.servo.value < 90:
+            return 15
+        if self.robot.servo.value > 90:
+            return -15
+        return 0
+
     def __move_code(self):
         """
         Moves the robot using the programmed instructions
@@ -534,6 +581,22 @@ class LinearActuatorLayer(Layer):
             self.__hit_left(False)
             self.__hit_right(False)
         return v
+
+    def set_physical_limits(self, motor_pressed, sensor_pressed):
+        """
+        Refleja el estado real de los finales de carrera del actuador físico en la
+        interfaz (lazo cerrado del gemelo). Motor = pulsador derecho, sensor = izquierdo.
+        Actualiza el dibujo, el modelo (button_left/right.value) y el HUD.
+        Arguments:
+            motor_pressed: True si el final de carrera del motor está pulsado
+            sensor_pressed: True si el final de carrera del sensor está pulsado
+        """
+        self.robot_drawing.set_buttons(
+            left_pressed=sensor_pressed, right_pressed=motor_pressed)
+        self.robot.button_left.value = 0 if sensor_pressed else 1
+        self.robot.button_right.value = 0 if motor_pressed else 1
+        self.hud.set_pressed(
+            [self.robot_drawing.but_left.pressed, self.robot_drawing.but_right.pressed])
 
     def __hit_left(self, has_hit):
         """
