@@ -7,7 +7,7 @@ import graphics.screen_updater as screen_updater
 import digital_twin.mqtt_twin as mqtt_twin
 import digital_twin.secure_config as secure_config
 import digital_twin.twin_identity as twin_identity
-import digital_twin.protocol as protocol
+import digital_twin.translators as translators
 from datetime import datetime
 
 # Tiempo máximo de espera (ms) para establecer la conexión MQTT antes de
@@ -29,6 +29,10 @@ class RobotsController:
         self.board = False
         self.new = True
         self.twin_client = None
+        # Estrategia de traducción del gemelo según el robot (la fija change_robot):
+        # CarTranslator para los coches, ActuatorTranslator para el actuador, None si no
+        # hay robot enlazable (placa Arduino).
+        self.translator: translators.TwinTranslator = None
         self._twin_identity = twin_identity.TwinIdentity()
         self._twin_poll_id = None
         self._twin_connected = False
@@ -58,7 +62,7 @@ class RobotsController:
         screen_updater.refresh()
         if not self.view.keys_used:
             self.loop_command.execute()
-        self._twin_drive_actuator()
+        self._twin_drive_loop()
         self.view.identifier = self.view.after(10, self.drawing_loop)
 
     def stop(self):
@@ -149,8 +153,8 @@ class RobotsController:
         self._twin_connected = False
         self._twin_control_active = False
         self._twin_jog_state = None
-        if isinstance(self.robot_layer, layers.LinearActuatorLayer):
-            self.robot_layer.twin_external = False
+        if self.translator is not None:
+            self.translator.detach(self.robot_layer)
         if announce:
             self.console.write_output("Gemelo digital desconectado.\n")
         self.view.on_twin_disconnected()
@@ -189,9 +193,13 @@ class RobotsController:
             return
         if text == "":
             return
+        if self.translator is None:
+            self.console.write_output(
+                "Gemelo digital: este robot no admite instrucciones.\n")
+            return
         try:
-            compact = protocol.encode(text)
-        except protocol.TranslationError as error:
+            compact = self.translator.encode(text)
+        except translators.TranslationError as error:
             self.console.write_output(
                 "Instrucción no válida (" + str(error) + ").\n")
             return
@@ -210,37 +218,27 @@ class RobotsController:
             + text + "  ->  " + compact + "\n")
 
     def _activate_twin_control(self):
-        """Activa el control en vivo y, si el robot es el actuador, ancla su bloque
-        al extremo motor (derecha) para compartir la referencia con el homing físico."""
+        """Activa el control en vivo y delega en el traductor el anclaje específico del
+        robot (p. ej. fijar el bloque del actuador al extremo motor)."""
         self._twin_control_active = True
         self._twin_jog_state = None
-        if isinstance(self.robot_layer, layers.LinearActuatorLayer):
-            # Bajo control, la posición del bloque la dicta ALF (mensajes "5,<pos>"),
-            # no el teclado: se suprime el desplazamiento local del bloque.
-            self.robot_layer.twin_external = True
-            drawing = self.robot_layer.robot_drawing
-            drawing.block.x = 1912  # extremo motor en el simulador (der)
-            drawing.drawing.move_image("block", drawing.block.x, drawing.block.y)
+        if self.translator is not None:
+            self.translator.on_control_activated(self.robot_layer)
 
-    def _twin_drive_actuator(self):
-        """Conduce el actuador físico en vivo: traduce la velocidad del bloque del
-        simulador a jog continuo (3,<dir>) / parada (4) y publica por MQTT.
+    def _twin_drive_loop(self):
+        """Conduce el robot físico en vivo: el traductor traduce la intención de
+        movimiento del layer a jog continuo (3,<dir>) / parada (4) y se publica por MQTT.
 
-        Solo con el gemelo conectado, el control activo ("C O" enviado) y el robot
-        siendo el actuador lineal. Publica solo al cambiar de estado, con un keepalive
-        periódico mientras se mueve (no satura el canal ni hace eco en consola)."""
+        Solo con el gemelo conectado y el control activo ("C O" enviado). Publica solo al
+        cambiar de estado, con un keepalive periódico mientras se mueve (no satura el canal
+        ni hace eco en consola)."""
         if not (self._twin_connected and self._twin_control_active):
             return
-        if not isinstance(self.robot_layer, layers.LinearActuatorLayer):
+        if self.translator is None:
             return
-
-        v = getattr(self.robot_layer, "last_v", 0)
-        if v > 0:      # derecha -> lado motor
-            desired = "3,0"
-        elif v < 0:    # izquierda -> lado sensor
-            desired = "3,1"
-        else:
-            desired = "4"
+        desired = self.translator.drive_from_sim(self.robot_layer)
+        if desired is None:
+            return
 
         now = datetime.now().timestamp() * 1000.0
         moving = desired != "4"
@@ -252,33 +250,22 @@ class RobotsController:
             self._twin_jog_last_ms = now
 
     def _apply_twin_position(self, text):
-        """Refleja en AL1 el estado real reportado por ALF (lazo cerrado): posición del
-        bloque y estado de los finales de carrera. Devuelve True si el mensaje era un
-        reporte válido (se haya aplicado o no), para no duplicarlo como eco en consola.
+        """Refleja en el canvas el estado real reportado por el robot físico (lazo
+        cerrado). Devuelve True si el mensaje era un reporte válido (se haya aplicado o
+        no), para no duplicarlo como eco en consola.
 
-        pos = cambios desde el extremo motor (0 = motor/derecha, 140 = sensor/izquierda).
-        x = 1912 - pos * PX_POR_CAMBIO, saturado al recorrido del bloque [508, 1912].
-        Botones: motor = derecho, sensor = izquierdo. El estado de los finales SOLO sale
-        del estado físico reportado (pin en LOW); nunca se infiere de la posición.
+        El traductor decodifica el reporte y lo aplica al layer. Solo se refleja si el
+        robot está EN EJECUCIÓN: antes de pulsar "Ejecutar" sus piezas no están dibujadas
+        en el canvas (move_image daría KeyError). No hace falta tener el control: basta
+        con estar conectado y ejecutando.
         """
-        fb = protocol.parse_position(text)
+        if self.translator is None:
+            return False
+        fb = self.translator.decode(text)
         if fb is None:
             return False
-        # Solo se refleja si el actuador está EN EJECUCIÓN: antes de pulsar "Ejecutar"
-        # el bloque y los pulsadores no están dibujados en el canvas (move_image daría
-        # KeyError). No hace falta tener el control: basta con estar conectado y ejecutando.
-        if self.executing and \
-                isinstance(self.robot_layer, layers.LinearActuatorLayer):
-            x = int(round(1912 - fb.pos * protocol.PX_POR_CAMBIO))
-            x = max(508, min(1912, x))
-            drawing = self.robot_layer.robot_drawing
-            drawing.block.x = x
-            drawing.drawing.move_image("block", drawing.block.x, drawing.block.y)
-
-            # Los botones reflejan el estado físico real (LOW = pulsado). Si el reporte
-            # no incluye los finales, no se tocan los botones (no se infiere de pos).
-            if fb.lim_motor is not None:
-                self.robot_layer.set_physical_limits(fb.lim_motor, fb.lim_sensor)
+        if self.executing:
+            self.translator.apply_to_sim(self.robot_layer, fb)
         return True
 
     def _poll_twin_inbox(self):
@@ -302,11 +289,11 @@ class RobotsController:
             self._cancel_twin_watchdog()
             if event[1] == 0:
                 self._twin_connected = True
-                # Modo pasivo: con solo conectar, AL1 refleja la posición real de ALF
-                # (que puede oscilar solo). Se suprime el desplazamiento local del bloque
-                # para que el teclado no pelee con la posición reflejada.
-                if isinstance(self.robot_layer, layers.LinearActuatorLayer):
-                    self.robot_layer.twin_external = True
+                # Modo pasivo: con solo conectar, el simulador refleja la pose real del
+                # robot físico (que puede moverse solo). El traductor suprime el
+                # desplazamiento local para que el teclado no pelee con la pose reflejada.
+                if self.translator is not None:
+                    self.translator.attach(self.robot_layer)
                 self.console.write_output(
                     "Gemelo digital conectado — pub: " + self.twin_client.pub_topic
                     + " · sub: " + self.twin_client.sub_topic + "\n")
@@ -355,6 +342,7 @@ class RobotsController:
             self.view.show_key_drawing(False)
             self.robot_layer = layers.MobileRobotLayer(2)
             self.board = False
+            self.translator = translators.CarTranslator()
         # Mobile Robot, 3 infrared
         elif option == 1:
             self.view.show_circuit_selector(True)
@@ -365,6 +353,7 @@ class RobotsController:
             self.view.show_key_drawing(False)
             self.robot_layer = layers.MobileRobotLayer(3)
             self.board = False
+            self.translator = translators.CarTranslator()
         # Mobile Robot,  4 infrared
         elif option == 2:
             self.view.show_circuit_selector(True)
@@ -375,6 +364,7 @@ class RobotsController:
             self.view.show_key_drawing(False)
             self.robot_layer = layers.MobileRobotLayer(4)
             self.board = False
+            self.translator = translators.CarTranslator()
         # Linear Actuator
         elif option == 3:
             self.view.show_circuit_selector(False)
@@ -385,6 +375,7 @@ class RobotsController:
             self.view.show_key_drawing(False)
             self.robot_layer = layers.LinearActuatorLayer()
             self.board = False
+            self.translator = translators.ActuatorTranslator()
         # Option for the Arduino Board
         elif option == 4:
             self.view.show_circuit_selector(False)
@@ -395,6 +386,8 @@ class RobotsController:
             self.view.show_key_drawing(False)
             self.robot_layer = layers.ArduinoBoardLayer()
             self.board = True
+            self.translator = None
+
 
     def change_circuit(self, option):
         if self.robot_layer is not None:

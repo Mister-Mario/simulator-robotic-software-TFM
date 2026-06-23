@@ -145,6 +145,13 @@ class MobileRobotLayer(Layer):
         self.is_moving = False
         self.circuit = None
         self.obstacle = None
+        # Última intención de movimiento (px/tick de avance y grados/tick de giro). La lee
+        # el controller para conducir el coche físico en vivo (jog) bajo control del gemelo.
+        self.last_v = 0
+        self.last_da = 0
+        # Bajo control del gemelo (lazo cerrado), la pose la fija el coche físico vía
+        # mensajes "5,<der>,<izq>"; el desplazamiento local del teclado se suprime.
+        self.twin_external = False
         # Infinite circuit: free unbounded plane with a trail behind the robot
         self.infinite = False
         self.trail = None
@@ -162,6 +169,15 @@ class MobileRobotLayer(Layer):
             v, da = self.__move_keys(move_WASD)
         else:
             v, da = self.__move_code()
+
+        # Se conserva la intención (la lee el controller para el jog del gemelo) aunque
+        # bajo control externo no se mueva el robot en local.
+        self.last_v = v
+        self.last_da = da
+        if self.twin_external:
+            # Bajo control del gemelo la pose la dicta el coche físico (feedback
+            # "5,<der>,<izq>", aplicado por el traductor); se suprime el movimiento local.
+            return
 
         future_p = self.robot_drawing.predict_movement(v)
         hit_border = (
@@ -196,6 +212,74 @@ class MobileRobotLayer(Layer):
         if self.infinite and self.trail is not None:
             self.trail.add_point(self.robot_drawing.x, self.robot_drawing.y)
             self.__follow_camera()
+
+    def apply_twin_move(self, v, da):
+        """Aplica al dibujo un avance ``v`` (px) y/o giro ``da`` (grados) reflejados del
+        coche físico, RESPETANDO los bordes del mundo y los obstáculos igual que el control
+        local: si el avance chocaría, se anula (el coche del sim no atraviesa la pared ni el
+        obstáculo, aunque el coche real siga). Lo llama ``CarTranslator.apply_to_sim``.
+        """
+        if v != 0:
+            future_p = self.robot_drawing.predict_movement(v)
+            hit_border = (
+                    future_p[0] <= self.robot_drawing.width / 2
+                    or future_p[0] >= self.robot_drawing.drawing_width - self.robot_drawing.width / 2
+                    or future_p[1] <= self.robot_drawing.height / 2
+                    or future_p[1] >= self.robot_drawing.drawing_height - self.robot_drawing.height / 2
+            )
+            # En el circuito infinito no hay bordes ni obstáculos que bloqueen.
+            if not self.infinite and (
+                    hit_border
+                    or self.__check_obstacle_collision(future_p[0], future_p[1])):
+                v = 0
+            self.robot_drawing.move(v)
+        if da != 0:
+            self.robot_drawing.change_angle(da)
+        self.__hud_velocity()
+
+        if self.circuit is not None:
+            self.__check_circuit_overlap()
+        if self.obstacle is not None:
+            self.__detect_obstacle()
+        if self.infinite and self.trail is not None:
+            self.trail.add_point(self.robot_drawing.x, self.robot_drawing.y)
+            self.__follow_camera()
+
+    def apply_twin_sensors(self, ir_values, dist_cm):
+        """Refleja en el canvas los sensores REALES del coche físico (modo pasivo del gemelo).
+
+        Lo llama ``CarTranslator.apply_to_sim`` al recibir la trama ``7,...``. Reusa los mismos
+        efectos que la detección virtual (``__check_circuit_overlap`` / ``__detect_obstacle``)
+        pero con los valores del robot físico en vez de los del circuito simulado.
+
+        Arguments:
+            ir_values: secuencia de 0/1 de los IR en orden físico izquierda->derecha
+                (1 = oscuro / sobre la línea). Se mapea posicionalmente a los sensores de luz
+                del dibujo; si el robot del sim tiene menos sensores, sobran los últimos IR.
+            dist_cm: distancia del ultrasonido en cm, o None si no hay eco.
+        """
+        light_sensors = self.robot_drawing.sensors["light"]
+        measurements = []
+        values = []
+        for sens, raw in zip(light_sensors, ir_values):
+            if raw:
+                sens.dark()
+                measurements.append(True)
+                values.append(1)
+            else:
+                sens.light()
+                measurements.append(False)
+                values.append(0)
+        if measurements:
+            self.robot.set_light_sens_value(values)
+            self.robot_drawing.repaint_light_sensors()
+            self.hud.set_circuit(measurements)
+
+        detecting = dist_cm is not None and dist_cm >= 0
+        self.robot_drawing.sensors["sound"].set_detect(detecting)
+        self.robot.sound.value = 1 if detecting else 0
+        self.robot.sound.dist = dist_cm if detecting else -1
+        self.hud.set_detect_obstacle([dist_cm if detecting else -1])
 
     def set_circuit(self, circuit_opt):
         """
