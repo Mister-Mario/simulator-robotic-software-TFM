@@ -135,18 +135,28 @@ class RobotsController:
 
     def disconnect_twin(self):
         """Desconecta el gemelo digital (acción del usuario)."""
-        self._teardown_twin(announce=True)
+        self._teardown_twin(announce=True, release_control=True)
 
-    def _teardown_twin(self, announce):
-        """Detiene cliente, sondeo y watchdog. Si announce, informa en consola."""
+    def _teardown_twin(self, announce, release_control=False):
+        """Detiene cliente, sondeo y watchdog. Si announce, informa en consola.
+
+        Si ``release_control`` y el gemelo está conectado, publica primero la
+        instrucción de soltar el control (``0,0``) para que el dispositivo
+        físico vuelva a su modo autónomo en vez de quedarse congelado. Solo se
+        hace en la desconexión iniciada por el usuario: en una caída inesperada
+        o un fallo de conexión el socket ya no sirve y no tiene sentido esperar.
+        """
         if self.twin_client is None:
             return
         self._cancel_twin_watchdog()
         if self._twin_poll_id is not None:
             self.view.after_cancel(self._twin_poll_id)
             self._twin_poll_id = None
+        farewell = None
+        if release_control and self._twin_connected and self.translator is not None:
+            farewell = self.translator.control_off()
         try:
-            self.twin_client.disconnect()
+            self.twin_client.disconnect(farewell)
         except Exception:
             pass
         self.twin_client = None
@@ -213,9 +223,44 @@ class RobotsController:
             # la desconexión.
             self._twin_control_active = False
             self._twin_jog_state = None
+        if compact in ("0,1", "0,0"):
+            # Mantiene el botón Controlar/Soltar en sintonía si el control se
+            # cambia desde la consola en vez de con el botón.
+            self.view.on_twin_control_changed(self._twin_control_active)
         self.console.write_output(
             'Publicado en "' + self.twin_client.pub_topic + '": '
             + text + "  ->  " + compact + "\n")
+
+    def is_twin_control_active(self):
+        return self._twin_control_active
+
+    def toggle_twin_control(self):
+        """Botón Controlar/Soltar: toma (0,1) o suelta (0,0) el control en vivo del
+        dispositivo físico, sin tener que escribir 'C O'/'C F' en la consola."""
+        if not self._twin_connected:
+            self.console.write_output(
+                "Gemelo digital no conectado: no se puede controlar.\n")
+            return
+        if self.translator is None:
+            self.console.write_output(
+                "Gemelo digital: este robot no admite control.\n")
+            return
+        self._send_twin_control(not self._twin_control_active)
+
+    def _send_twin_control(self, active):
+        """Publica la trama de control y actualiza estado, consola y botón. Misma
+        lógica que send_twin_input para 'C O'/'C F', reutilizable desde el botón."""
+        compact = self.translator.control_on() if active else self.translator.control_off()
+        self.publish_twin(compact)
+        if active:
+            self._activate_twin_control()
+        else:
+            self._twin_control_active = False
+            self._twin_jog_state = None
+        self.console.write_output(
+            'Publicado en "' + self.twin_client.pub_topic + '": '
+            + ("C O" if active else "C F") + "  ->  " + compact + "\n")
+        self.view.on_twin_control_changed(self._twin_control_active)
 
     def _activate_twin_control(self):
         """Activa el control en vivo y delega en el traductor el anclaje específico del
@@ -323,6 +368,7 @@ class RobotsController:
                 self.console.write_output(
                     "Gemelo digital: conexión perdida (código "
                     + str(event[1]) + ").\n")
+    # --------------------------------------------------- Fin Gemelo digital MQTT
 
     def change_robot(self, option):
         """

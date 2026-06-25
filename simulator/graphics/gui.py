@@ -90,6 +90,7 @@ class MainApplication(tk.Tk):
     def stop(self, event=None):
         self.controller.stop()
 
+    # ----------------------------------------------------- Gemelo digital MQTT
     def toggle_digital_twin_mode(self, event=None):
         if self.selector_bar.twin_var.get():
             self.selector_bar.show_twin_controls()
@@ -111,11 +112,20 @@ class MainApplication(tk.Tk):
     def mqtt_disconnect(self, event=None):
         self.controller.disconnect_twin()
 
+    def mqtt_toggle_control(self, event=None):
+        self.controller.toggle_twin_control()
+
     def on_twin_connected(self):
         self.selector_bar.set_connected(True)
+        self.selector_bar.show_control_button()
 
     def on_twin_disconnected(self):
         self.selector_bar.set_connected(False)
+        self.selector_bar.hide_control_button()
+
+    def on_twin_control_changed(self, controlling):
+        self.selector_bar.set_controlling(controlling)
+    # --------------------------------------------------- Fin Gemelo digital MQTT
 
     def editor_undo(self):
         self.editor_frame.text.edit_undo()
@@ -1584,6 +1594,10 @@ class SelectorBar(tk.Frame):
             self, text="Conectar", command=application.mqtt_connect,
             bg=BLUE, fg="white", activebackground=BLUE, font=("Consolas", 11),
             underline=2)  # 'n' de Conectar (Alt-n); en Desconectar -> 'd' (Alt-d)
+        self.control_button = tk.Button(
+            self, text="Controlar", command=application.mqtt_toggle_control,
+            bg=BLUE, fg="white", activebackground=BLUE, font=("Consolas", 11),
+            underline=6)  # 'l' de controLar (Alt-l); en Liberar -> 'L'
 
         self.robot_selector.bind(
             "<<ComboboxSelected>>", application.change_robot)
@@ -1600,6 +1614,9 @@ class SelectorBar(tk.Frame):
                          if self.connect_button.winfo_ismapped() else None)
         application.bind("<Alt-d>", lambda event: self.connect_button.invoke()
                          if self.connect_button.winfo_ismapped() else None)
+        # Controlar/Liberar = Alt-l (mismo boton, texto alterna)
+        application.bind("<Alt-l>", lambda event: self.control_button.invoke()
+                         if self.control_button.winfo_ismapped() else None)
 
         self.lb_robot.grid(row=0, column=0)
         self.robot_selector.grid(row=0, column=1, padx=(5, 15))
@@ -1647,6 +1664,7 @@ class SelectorBar(tk.Frame):
         self.connect_button.grid(row=0, column=7, padx=(0, 5))
 
     def hide_twin_controls(self):
+        self.hide_control_button()
         if self.connect_button.winfo_ismapped():
             self.connect_button.grid_forget()
         if self.theme_entry.winfo_ismapped():
@@ -1658,3 +1676,18 @@ class SelectorBar(tk.Frame):
         self.connect_button.config(
             text="Desconectar" if connected else "Conectar",
             underline=0 if connected else 2)  # 'd' de Desconectar / 'n' de Conectar
+
+    # El botón Controlar/Soltar solo aparece con el gemelo conectado: tomar el
+    # control sin conexión no tiene sentido.
+    def show_control_button(self):
+        self.control_button.config(text="Controlar", underline=6)
+        self.control_button.grid(row=0, column=8, padx=(0, 5))
+
+    def hide_control_button(self):
+        if self.control_button.winfo_ismapped():
+            self.control_button.grid_forget()
+
+    def set_controlling(self, controlling):
+        self.control_button.config(
+            text="Liberar" if controlling else "Controlar",
+            underline=0 if controlling else 6)  # 'L' de Liberar / 'l' de controLar

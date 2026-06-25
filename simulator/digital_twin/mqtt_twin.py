@@ -48,6 +48,7 @@ class DigitalTwinClient:
             self._client = mqtt.Client(
                 client_id=self.client_id, clean_session=True)
 
+        # Registro de callbacks para paho
         self._client.on_connect = self._on_connect
         self._client.on_message = self._on_message
         self._client.on_subscribe = self._on_subscribe
@@ -66,11 +67,32 @@ class DigitalTwinClient:
         self._client.connect_async(self.host, self.port, keepalive=60)
         self._client.loop_start()
 
-    def disconnect(self):
+    def disconnect(self, farewell=None):
+        """Cierra la conexión. Si se indica ``farewell``, lo publica y espera a
+        que salga **antes** de desconectar (último mensaje, p.ej. soltar el
+        control con ``0,0``), para que el dispositivo lo reciba aunque luego se
+        caiga el socket."""
         try:
+            if farewell is not None:
+                info = self._client.publish(self.pub_topic, farewell)
+                self._wait_published(info)
             self._client.disconnect()
         finally:
             self._client.loop_stop()
+
+    @staticmethod
+    def _wait_published(info, timeout=1.0):
+        """Bloquea hasta que el mensaje sale (o expira el tiempo). Tolera la
+        diferencia de firma de ``wait_for_publish`` entre paho 1.x y 2.x."""
+        try:
+            info.wait_for_publish(timeout)
+        except TypeError:  # paho 1.x: wait_for_publish() no admite timeout
+            try:
+                info.wait_for_publish()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def publish_text(self, text):
         """Publica un texto en el tema de publicación (``s + theme``)."""

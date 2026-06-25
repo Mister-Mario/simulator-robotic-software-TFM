@@ -213,6 +213,7 @@ class MobileRobotLayer(Layer):
             self.trail.add_point(self.robot_drawing.x, self.robot_drawing.y)
             self.__follow_camera()
 
+    # ------------------------------------------------- Gemelo digital (reflejo)
     def apply_twin_move(self, v, da):
         """Aplica al dibujo un avance ``v`` (px) y/o giro ``da`` (grados) reflejados del
         coche físico, RESPETANDO los bordes del mundo y los obstáculos igual que el control
@@ -280,6 +281,7 @@ class MobileRobotLayer(Layer):
         self.robot.sound.value = 1 if detecting else 0
         self.robot.sound.dist = dist_cm if detecting else -1
         self.hud.set_detect_obstacle([dist_cm if detecting else -1])
+    # ----------------------------------------------- Fin Gemelo digital (reflejo)
 
     def set_circuit(self, circuit_opt):
         """
@@ -666,6 +668,7 @@ class LinearActuatorLayer(Layer):
             self.__hit_right(False)
         return v
 
+    # ------------------------------------------------- Gemelo digital (reflejo)
     def set_physical_limits(self, motor_pressed, sensor_pressed):
         """
         Refleja el estado real de los finales de carrera del actuador físico en la
@@ -681,6 +684,7 @@ class LinearActuatorLayer(Layer):
         self.robot.button_right.value = 0 if motor_pressed else 1
         self.hud.set_pressed(
             [self.robot_drawing.but_left.pressed, self.robot_drawing.but_right.pressed])
+    # ----------------------------------------------- Fin Gemelo digital (reflejo)
 
     def __hit_left(self, has_hit):
         """

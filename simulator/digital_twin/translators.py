@@ -64,6 +64,18 @@ class TwinTranslator:
             raise TranslationError("uso: 'C O' o 'C F'")
         return "0,1" if tokens[1].upper() == "O" else "0,0"
 
+    def control_on(self):
+        """Trama compacta que toma el control en vivo del dispositivo físico
+        (igual que la instrucción legible ``C O``). Común a todos los robots."""
+        return "0,1"
+
+    def control_off(self):
+        """Trama compacta que suelta el control del dispositivo físico (igual que
+        la instrucción legible ``C F``). Común a todos los robots: se envía al
+        desconectar para que el dispositivo vuelva a su modo autónomo en vez de
+        quedarse congelado esperando órdenes."""
+        return "0,0"
+
     @staticmethod
     def _parse_valor(raw, as_float):
         """Valida y normaliza un valor numérico positivo. ``as_float`` decide si se
@@ -277,13 +289,13 @@ class CarTranslator(TwinTranslator):
     # ---- calibración ----
     MM_POR_CAMBIO_COCHE = 3.8        # 190 mm / 50 cambios (calibración física)
 
-    # Escala imagen <-> realidad: el ancho del coche son ANCHO_COCHE_PX px en la imagen.
-    # PX_POR_MM = ancho imagen / ancho real; así una distancia real se ve a la misma escala
-    # que el dibujo (avance del reflejo proporcional al real).
-    ANCHO_COCHE_PX = 516            # ancho de la imagen del coche (robot_drawings.py)
-    ANCHO_COCHE_MM = 125.0         # ancho real del coche (medido): 12.5 cm
-    PX_POR_MM_COCHE = ANCHO_COCHE_PX / ANCHO_COCHE_MM
-    PX_POR_CAMBIO_COCHE = MM_POR_CAMBIO_COCHE * PX_POR_MM_COCHE  # derivada (px por cambio)
+    # Escala píxel <-> realidad: 1 px = 0.38 mm, la MISMA escala del circuito laberinto
+    # (cinta 4 cm = 100 px y largo 119 cm ~ 3300 px -> ~0.38 mm/px). El coche se mueve
+    # SOBRE el circuito, así que comparte su escala para que el avance del reflejo cuadre
+    # con la pista.
+    MM_POR_PX_COCHE = 0.38          # 1 píxel del circuito = 0.38 mm reales
+    PX_POR_MM_COCHE = 1.0 / MM_POR_PX_COCHE                       # ~2.63 px/mm
+    PX_POR_CAMBIO_COCHE = MM_POR_CAMBIO_COCHE * PX_POR_MM_COCHE   # derivada (px por cambio) = 10.0
 
     #El estudio realizado muestra que 32 cambios detectados son 90º de giro del coche
     FACTOR_CONVERSION_GRADOS_SIM_POR_CAMBIO_COCHE = 90.0/32
@@ -403,7 +415,7 @@ class CarTranslator(TwinTranslator):
         El micro reinicia los contadores al empezar cada comando, así que se trabaja con el
         INCREMENTO desde el último reporte. El sentido del movimiento (``_last_motion``) decide
         si el incremento es avance (px) o giro (grados):
-            A/R -> avance:  px = delta * PX_POR_CAMBIO_COCHE   (escala por ancho del coche)
+            A/R -> avance:  px = delta * PX_POR_CAMBIO_COCHE   (escala del circuito: 0.38 mm/px)
             I/D -> giro:    deg = delta * FACTOR_CONVERSION_GRADOS_SIM_POR_CAMBIO_COCHE
                             (32 cambios = 90°, medido)
 
